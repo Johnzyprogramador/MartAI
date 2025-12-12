@@ -35,7 +35,7 @@ class TabularDataLoader:
     def __init__(self, data_path, batch_size, columns, 
                  cardinalities_path=None, shuffle=False,
                  num_workers=0, num_batches_per_epoch=None,
-                 format=None, **kwargs):
+                 format=None, target=None, **kwargs):
         """
         Initialize tabular data loader.
         
@@ -43,21 +43,22 @@ class TabularDataLoader:
             data_path: Path to data file
             batch_size: Number of samples per batch
             columns: Dict with keys 'numerical', 'categorical', 'embeddings'
-                     Each is a list of column names
-            cardinalities_path: Path to JSON with categorical mappings (optional)
+                     These are exclusively INPUT features.
+            cardinalities_path: Path to JSON with categorical mappings
             shuffle: Whether to shuffle data
             num_workers: Number of data loading workers
             num_batches_per_epoch: Limit batches per epoch (None = use all)
-            format: Optional format override (e.g., 'csv', 'parquet')
-                   If None, auto-detected from extension
+            format: Optional format override
+            target: Dict defining target features, e.g. {'categorical': ['label']}
+                   If None, defaults to self-supervised (inputs = targets).
             **kwargs: Additional arguments passed to pandas read function
-                     (e.g., sep=';' for CSV, engine='pyarrow' for Parquet)
         """
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.num_workers = num_workers
         self.num_batches_per_epoch = num_batches_per_epoch
         self.columns = columns
+        self.target_config = target
         
         # Load dataframe
         self.df = self._load_dataframe(data_path, format, **kwargs)
@@ -67,13 +68,13 @@ class TabularDataLoader:
         
         # Load cardinalities if categorical columns present
         self.cardinalities = None
-        if cardinalities_path and columns['categorical']:
+        if cardinalities_path and (columns.get('categorical') or (target and target.get('categorical'))):
             with open(cardinalities_path, 'r') as f:
                 self.cardinalities = json.load(f)
             self._validate_cardinalities()
         
         # Create PyTorch dataset and dataloader
-        dataset = TabularDataset(self.df, columns, self.cardinalities)
+        dataset = TabularDataset(self.df, columns, self.cardinalities, target_config=target)
         self.dataloader = DataLoader(
             dataset,
             batch_size=batch_size,
@@ -119,15 +120,27 @@ class TabularDataLoader:
     
     def _validate_columns(self):
         """Validate that all specified columns exist in dataframe."""
-        all_specified_columns = (
-            self.columns['numerical'] + 
-            self.columns['categorical'] + 
-            self.columns['embeddings']
-        )
+        all_specified_columns = []
         
+        # Input columns
+        if self.columns.get('numerical'):
+            all_specified_columns.extend(self.columns['numerical'])
+        if self.columns.get('categorical'):
+             all_specified_columns.extend(self.columns['categorical'])
+        if self.columns.get('embeddings'):
+             all_specified_columns.extend(self.columns['embeddings'])
+             
+        # Target columns if supervised
+        if self.target_config:
+            if self.target_config.get('numerical'):
+                all_specified_columns.extend(self.target_config['numerical'])
+            if self.target_config.get('categorical'):
+                all_specified_columns.extend(self.target_config['categorical'])
+
         if not all_specified_columns:
             raise ValueError("No columns specified. At least one column type must be non-empty.")
         
+        # Check for missing columns in dataframe
         missing_columns = set(all_specified_columns) - set(self.df.columns)
         if missing_columns:
             raise ValueError(f"Columns not found in data: {missing_columns}")
@@ -137,7 +150,15 @@ class TabularDataLoader:
         if not self.cardinalities:
             return
         
-        missing_cardinalities = set(self.columns['categorical']) - set(self.cardinalities.keys())
+        # Collect all categorical columns (input + target)
+        required_cat_cols = []
+        if self.columns.get('categorical'):
+            required_cat_cols.extend(self.columns['categorical'])
+            
+        if self.target_config and self.target_config.get('categorical'):
+             required_cat_cols.extend(self.target_config['categorical'])
+        
+        missing_cardinalities = set(required_cat_cols) - set(self.cardinalities.keys())
         if missing_cardinalities:
             raise ValueError(
                 f"Cardinalities missing for categorical columns: {missing_cardinalities}"
@@ -170,27 +191,35 @@ class TabularDataset(Dataset):
     Handles numerical, categorical, and embedding features.
     """
     
-    def __init__(self, df, columns, cardinalities):
+    def __init__(self, df, columns, cardinalities, target_config=None):
         """
         Initialize dataset.
         
         Args:
             df: pandas DataFrame
-            columns: Dict with 'numerical', 'categorical', 'embeddings' keys
+            columns: Dict with 'numerical', 'categorical', 'embeddings' keys (Inputs)
             cardinalities: Dict mapping categorical columns to value mappings
+            target_config: Dict defining target features (Supervised) or None (Self-Supervised)
         """
         self.df = df
         self.columns = columns
         self.cardinalities = cardinalities
+        self.target_config = target_config
         
-        # Prepare data tensors
+        # Prepare INPUT data tensors 
+        # (We use self.columns directly as they now strictly define inputs)
         self.numerical = self._prepare_numerical()
         self.categorical = self._prepare_categorical()
         self.embeddings = self._prepare_embeddings()
+        
+        # Prepare TARGET tensors if supervised
+        print(f"DEBUG: TabularDataset init target_config: {target_config}")
+        self.targets = self._prepare_targets() if target_config else None
+        print(f"DEBUG: TabularDataset generated targets keys: {self.targets.keys() if self.targets else 'None'}")
     
     def _prepare_numerical(self):
         """Prepare numerical features as tensor."""
-        if not self.columns['numerical']:
+        if not self.columns.get('numerical'):
             return None
         
         numerical_data = self.df[self.columns['numerical']].values
@@ -198,7 +227,7 @@ class TabularDataset(Dataset):
     
     def _prepare_categorical(self):
         """Prepare categorical features as tensor."""
-        if not self.columns['categorical']:
+        if not self.columns.get('categorical'):
             return None
         
         # Map categorical values to integers using cardinalities
@@ -220,7 +249,7 @@ class TabularDataset(Dataset):
     
     def _prepare_embeddings(self):
         """Prepare embedding features as tensor."""
-        if not self.columns['embeddings']:
+        if not self.columns.get('embeddings'):
             return None
         
         # Embeddings might be stored as strings/lists - need to parse
@@ -234,6 +263,27 @@ class TabularDataset(Dataset):
                             for row in embedding_data]
         
         return torch.FloatTensor(embedding_data)
+
+    def _prepare_targets(self):
+        """Prepare target features as dict of tensors."""
+        targets = {}
+        
+        # Numerical targets
+        if self.target_config.get('numerical'):
+             num_data = self.df[self.target_config['numerical']].values
+             targets['numerical'] = torch.FloatTensor(num_data)
+             
+        # Categorical targets
+        if self.target_config.get('categorical'):
+             cat_data = self.df[self.target_config['categorical']].copy()
+             for col in self.target_config['categorical']:
+                  if col in self.cardinalities:
+                        cat_data[col] = cat_data[col].map(self.cardinalities[col])
+                        if cat_data[col].isna().any():
+                             raise ValueError(f"Unmapped values in target '{col}'")
+             targets['categorical'] = torch.LongTensor(cat_data.values)
+             
+        return targets
     
     def __len__(self):
         """Return number of samples."""
@@ -251,25 +301,29 @@ class TabularDataset(Dataset):
         # Add features
         if self.numerical is not None:
             batch['numerical'] = self.numerical[idx]
-        else:
-            batch['numerical'] = None
-        
+
         if self.categorical is not None:
             batch['categorical'] = self.categorical[idx]
-        else:
-            batch['categorical'] = None
-        
+
         if self.embeddings is not None:
             batch['embeddings'] = self.embeddings[idx]
+
+        # Targets
+        if self.targets:
+            # Supervised: return specific target dict
+            # We need to slice each tensor in the dictionary
+            batch['targets'] = {
+                k: v[idx] for k, v in self.targets.items()
+            }
         else:
-            batch['embeddings'] = None
-        
-        # For self-supervised: targets reference the same tensors (memory efficient)
-        batch['targets'] = {
-            'numerical': batch['numerical'],
-            'categorical': batch['categorical'],
-            'embeddings': batch['embeddings']
-        }
+            # Self-supervised: targets reference the same tensors (memory efficient)
+            batch['targets'] = {}
+            if self.numerical is not None:
+                batch['targets']['numerical'] = batch['numerical']
+            if self.categorical is not None:
+                batch['targets']['categorical'] = batch['categorical']
+            if self.embeddings is not None:
+                batch['targets']['embeddings'] = batch['embeddings']
         
         # Optional metadata
         batch['metadata'] = {'index': idx}

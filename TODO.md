@@ -12,7 +12,7 @@ gantt
     Code Implementation (VAE/SAE/Runners) :active, code, 2024-12-13, 2024-12-15
     Feature Selection (BAF Dataset)       :active, feats, 2024-12-13, 2024-12-15
 
-    section 🧪 Pilot
+    section 🧪 **Pilot**
     Small Scale Validation                :crit, pilot, after code, 3d
 
     section 🔍 Latent Size
@@ -32,9 +32,14 @@ gantt
 ### 🏗️ Foundation: Implementation & Setup
 **Goal:** Complete core codebase and feature selection by **Sunday, Dec 15**.
 
+- [ ] **Data Loaders**
+  - [x] Implement `TabularDataLoader` class
+  - [ ] Validate `TabularDataLoader` class with BAF on a subset of features
 - [ ] **Core Models**
-  - [ ] Implement `VAE` class
-  - [ ] Implement `SAE` (Sparse Autoencoder) class
+  - [x] Implement `VAE` class
+  - [ ] Validate `VAE` class
+  - [ ] Implement `SAE` class
+  - [ ] Validate `SAE` class
 - [ ] **Training Infrastructure**
   - [ ] Implement Runners/Trainers
   - [ ] Create training scripts
