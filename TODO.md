@@ -35,6 +35,8 @@ gantt
 - [ ] **Data Loaders**
   - [x] Implement `TabularDataLoader` class
   - [ ] Validate `TabularDataLoader` class with BAF on a subset of features
+- [ ] **Utils Config**
+  - [ ] Implement the target column (target: None ou target: categorical: -Fraud ou target: numerical: -Amount )
 - [ ] **Core Models**
   - [x] Implement `VAE` class
   - [ ] Validate `VAE` class

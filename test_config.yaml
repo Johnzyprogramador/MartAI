@@ -1,0 +1,46 @@
+experiment:
+  name: test_vae
+  output_dir: ./experiments/vae
+  seed: 42
+  device: cuda
+model:
+  class: VAE
+  params:
+    num_layers: 3
+    log2_last_dim: 5
+    cardinalities:
+    - 2
+    - 2
+    input_dim_num: 2
+    input_dim_cat: 2
+    input_dim_emb: 0
+data:
+  columns:
+    numerical:
+    - amount
+    - distance
+    categorical:
+    - channel
+    - merchant
+    embeddings: []
+  cardinalities_path: ./data/cardinalities.json
+train:
+  data_path: ./data/train.csv
+  loader_class: TabularDataLoader
+  loader_params:
+    batch_size: 128
+    shuffle: true
+    num_workers: 4
+  epochs: 100
+  optimizer_config:
+    optimizer: Adam
+    learning_rate: 0.001
+  loss:
+    class: VAELoss
+    params:
+      loss_factor: 1.0
+      beta: 1.0
+checkpoint:
+  metric: val_loss
+  mode: min
+  save_strategy: best
